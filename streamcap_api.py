@@ -206,9 +206,9 @@ class StreamCapAPI:
         self.proxy = proxy
         self.cookies = cookies
         self.record_quality = record_quality
-        self.save_format = save_format.lower()
+        self.save_format = save_format.lower() if save_format else "mp4"
         self.segment_record = segment_record
-        self.segment_time = str(segment_time)
+        self.segment_time = str(segment_time) if segment_time else "1800"
         
         # 文件名和文件夹配置
         self.filename_includes_title = filename_includes_title
@@ -224,8 +224,104 @@ class StreamCapAPI:
         self.ffmpeg_process = None
         self.recording_dir = None
         
+        # 监控状态
+        self.is_monitoring = False
+        self.monitor_task = None
+        self.monitor_interval = 60  # 默认监控间隔为60秒
+        self.monitor_url = None
+        
+        # 状态文件
+        self.status_file_path = None
+        self.status_check_task = None
+        self._setup_status_file()
+        
         # 创建输出目录
         os.makedirs(self.output_dir, exist_ok=True)
+    
+    def _setup_status_file(self):
+        """创建状态文件，用于进程间通信"""
+        import tempfile
+        import os
+        import json
+        
+        # 创建临时状态文件
+        temp_dir = tempfile.gettempdir()
+        import uuid
+        unique_id = str(uuid.uuid4())[:8]
+        self.status_file_path = os.path.join(temp_dir, f"streamcap_{unique_id}.status")
+        
+        # 写入初始状态
+        self._update_status_file()
+        
+        # 我们不能在__init__中创建异步任务，因为此时没有运行的事件循环
+        # 这个任务将在start_recording和start_monitoring方法中启动
+        self.status_check_task = None
+    
+    def _update_status_file(self):
+        """更新状态文件信息"""
+        if not self.status_file_path:
+            return
+            
+        import json
+        import os
+        
+        # 准备状态数据
+        status_data = {
+            'pid': os.getpid(),
+            'is_recording': self.is_recording,
+            'is_monitoring': self.is_monitoring,
+            'monitor_url': self.monitor_url,
+            'stop_requested': False,
+            'timestamp': time.time()
+        }
+        
+        # 写入状态文件
+        try:
+            with open(self.status_file_path, 'w') as f:
+                json.dump(status_data, f)
+        except Exception as e:
+            print(f"更新状态文件时出错: {str(e)}")
+    
+    async def _check_status_file(self):
+        """检查状态文件中的停止请求"""
+        import json
+        import asyncio
+        
+        while True:
+            try:
+                # 如果文件不存在，可能已经被删除
+                if not os.path.exists(self.status_file_path):
+                    self._update_status_file()
+                
+                # 读取状态文件
+                with open(self.status_file_path, 'r') as f:
+                    status_data = json.load(f)
+                
+                # 检查是否有停止请求
+                if status_data.get('stop_requested', False):
+                    print("接收到外部停止请求")
+                    
+                    # 停止录制
+                    if self.is_recording:
+                        await self.stop_recording()
+                        
+                    # 停止监控
+                    if self.is_monitoring:
+                        await self.stop_monitoring()
+                    
+                    # 清除停止请求标志
+                    status_data['stop_requested'] = False
+                    with open(self.status_file_path, 'w') as f:
+                        json.dump(status_data, f)
+            except Exception as e:
+                # 忽略错误，确保循环不会中断
+                pass
+            
+            # 更新状态文件
+            self._update_status_file()
+            
+            # 每秒检查一次
+            await asyncio.sleep(1)
     
     def clean_name(self, name: str, default: str = None) -> str:
         """清理名称，移除不允许的字符"""
@@ -372,7 +468,12 @@ class StreamCapAPI:
     
     async def start_recording(self, live_url: str) -> str:
         """开始录制直播"""
+        save_path = None
         try:
+            # 启动状态检查任务
+            if self.status_check_task is None or self.status_check_task.done():
+                self.status_check_task = asyncio.create_task(self._check_status_file())
+            
             # 获取流信息
             stream_info = await self.fetch_stream(live_url)
             
@@ -418,6 +519,8 @@ class StreamCapAPI:
             )
             
             self.is_recording = True
+            # 更新状态文件
+            self._update_status_file()
             
             # 等待进程完成
             print("录制进行中，按Ctrl+C停止...")
@@ -441,8 +544,13 @@ class StreamCapAPI:
                 print("接收到停止信号，正在停止录制...")
                 await self.stop_recording()
                 print("录制已手动停止")
+            except Exception as e:
+                print(f"录制过程中发生异常: {str(e)}")
+                await self.stop_recording()
             finally:
                 self.is_recording = False
+                # 更新状态文件
+                self._update_status_file()
             
             # 如果有自定义脚本，运行它
             if self.custom_script_command:
@@ -469,6 +577,8 @@ class StreamCapAPI:
             import traceback
             traceback.print_exc()
             self.is_recording = False
+            # 更新状态文件
+            self._update_status_file()
             
             # 尝试清理未完成的进程
             if self.ffmpeg_process:
@@ -482,7 +592,7 @@ class StreamCapAPI:
                     except Exception:
                         pass
             
-            return None
+            return save_path  # 即使发生错误也返回路径
     
     async def stop_recording(self):
         """停止录制"""
@@ -498,10 +608,13 @@ class StreamCapAPI:
                 print("已发送退出命令")
                 # 给一点时间让FFmpeg处理q命令
                 try:
-                    await asyncio.wait_for(self.ffmpeg_process.wait(), timeout=5.0)
+                    await asyncio.wait_for(self.ffmpeg_process.wait(), timeout=10.0)  # 延长超时时间
                     print("FFmpeg进程已正常退出")
                     self.is_recording = False
                     self.ffmpeg_process = None
+                    # 更新状态文件
+                    self._update_status_file()
+                    print("录制文件已保存")
                     return True
                 except asyncio.TimeoutError:
                     print("FFmpeg进程在接收到q命令后没有及时退出，将强制终止")
@@ -514,7 +627,7 @@ class StreamCapAPI:
             self.ffmpeg_process.terminate()
             # 等待进程结束，超时后强制终止
             try:
-                await asyncio.wait_for(self.ffmpeg_process.wait(), timeout=5.0)
+                await asyncio.wait_for(self.ffmpeg_process.wait(), timeout=10.0)  # 延长超时时间
                 print("FFmpeg进程已成功终止")
             except asyncio.TimeoutError:
                 print("FFmpeg进程没有及时退出，强制终止")
@@ -534,6 +647,9 @@ class StreamCapAPI:
         
         self.is_recording = False
         self.ffmpeg_process = None
+        # 更新状态文件
+        self._update_status_file()
+        print("录制文件已保存")
         return True
     
     async def run_custom_script(self, script_command: str, save_path: str):
@@ -569,6 +685,120 @@ class StreamCapAPI:
                     
         except Exception as e:
             print(f"执行自定义脚本时出错: {str(e)}")
+            
+    async def start_monitoring(self, live_url: str, interval: int = 60) -> bool:
+        """
+        启动监控功能 - API接口1
+        
+        参数:
+            live_url: 直播URL
+            interval: 检查间隔(秒)
+            
+        返回:
+            是否成功启动监控
+        """
+        # 如果已经在监控，直接返回
+        if self.is_monitoring:
+            print(f"已经在监控直播: {self.monitor_url}")
+            return False
+            
+        # 启动状态检查任务
+        if self.status_check_task is None or self.status_check_task.done():
+            self.status_check_task = asyncio.create_task(self._check_status_file())
+            
+        self.monitor_interval = interval
+        self.monitor_url = live_url
+        self.is_monitoring = True
+        
+        # 创建监控任务
+        self.monitor_task = asyncio.create_task(self._monitor_loop())
+        
+        # 更新状态文件
+        self._update_status_file()
+        
+        print(f"开始监控直播: {live_url}")
+        print(f"监控间隔: {interval}秒")
+        return True
+        
+    async def stop_monitoring(self) -> bool:
+        """
+        停止监控功能 - API接口2
+        
+        返回:
+            是否成功停止监控
+        """
+        if not self.is_monitoring:
+            print("当前没有正在进行的监控")
+            return False
+            
+        self.is_monitoring = False
+        
+        # 取消监控任务
+        if self.monitor_task and not self.monitor_task.done():
+            self.monitor_task.cancel()
+            try:
+                await self.monitor_task
+            except asyncio.CancelledError:
+                pass
+                
+        self.monitor_task = None
+        print(f"已停止监控: {self.monitor_url}")
+        self.monitor_url = None
+        
+        # 更新状态文件
+        self._update_status_file()
+        
+        return True
+        
+    async def _monitor_loop(self) -> None:
+        """监控循环"""
+        try:
+            while self.is_monitoring:
+                # 如果当前正在录制，则跳过检查
+                if self.is_recording:
+                    await asyncio.sleep(self.monitor_interval)
+                    continue
+                    
+                try:
+                    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    print(f"[{now}] 检查直播状态: {self.monitor_url}")
+                    
+                    # 获取流信息
+                    stream_info = await self.fetch_stream(self.monitor_url)
+                    
+                    if stream_info and stream_info.is_live:
+                        print(f"[{now}] 检测到直播开始！")
+                        
+                        # 开始录制
+                        asyncio.create_task(self.start_recording(self.monitor_url))
+                    else:
+                        print(f"[{now}] 直播未开始，继续监控...")
+                        
+                except Exception as e:
+                    print(f"监控过程中出错: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    
+                # 等待下一次检查
+                await asyncio.sleep(self.monitor_interval)
+                
+        except asyncio.CancelledError:
+            print("监控任务已取消")
+        except Exception as e:
+            print(f"监控循环出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            self.is_monitoring = False
+    
+    async def get_monitoring_status(self) -> dict:
+        """获取监控状态"""
+        status = {
+            "is_monitoring": self.is_monitoring if hasattr(self, 'is_monitoring') else False,
+            "is_recording": self.is_recording if hasattr(self, 'is_recording') else False,
+            "monitor_url": getattr(self, 'monitor_url', None),
+            "monitor_interval": getattr(self, 'monitor_interval', 0)
+        }
+        return status
     
     async def converts_mp4(self, file_path: str, delete_original: bool = True) -> str:
         """将录制文件转换为MP4格式"""
@@ -623,96 +853,139 @@ class StreamCapAPI:
             traceback.print_exc()
             return file_path
 
-async def main():
-    # 创建命令行参数解析器
-    parser = argparse.ArgumentParser(description="StreamCap API - 直播录制工具")
+    def __del__(self):
+        """析构函数，用于清理资源"""
+        # 清理状态文件
+        if hasattr(self, 'status_file_path') and self.status_file_path and os.path.exists(self.status_file_path):
+            try:
+                os.remove(self.status_file_path)
+            except:
+                pass
+
+if __name__ == "__main__":
+    import argparse
     
-    # 必需参数
-    parser.add_argument("--url", type=str, required=True, help="直播间URL地址")
+    # 直接在这里设置参数而不是通过命令行
+    # -------------用户配置区域-------------
+    # 必填参数
+    live_url = "https://live.douyin.com/390687614124"  # 您的直播URL
     
-    # 输出相关参数
-    parser.add_argument("--output", type=str, default="downloads", help="输出目录")
-    parser.add_argument("--format", type=str, default="mp4", choices=["mp4", "flv", "ts"], help="录制格式")
+    # 基本设置
+    mode = "monitor"  # 运行模式: "monitor"(监控直播并自动录制) 或 "record"(直接录制)
     
-    # 录制选项
-    parser.add_argument("--quality", type=str, default="原画", choices=["原画", "高清", "标清", "流畅"], help="录制画质")
-    parser.add_argument("--segment", action="store_true", help="启用分段录制")
-    parser.add_argument("--segment-time", type=int, default=1800, help="分段时间(秒)")
+    # 输出设置
+    output_dir = "downloads"  # 输出目录
+    save_format = "mp4"  # 录制格式: mp4, flv, ts
+    record_quality = "原画"  # 录制画质: "原画", "高清", "标清", "流畅"
     
-    # 代理和网络选项
-    parser.add_argument("--proxy", type=str, help="代理地址, 例如: http://127.0.0.1:7890")
-    parser.add_argument("--cookies", type=str, help="Cookies文件路径(JSON格式)")
-    parser.add_argument("--force-https", action="store_true", help="强制使用HTTPS录制")
+    # 分段录制设置
+    segment_record = True  # 是否启用分段录制（推荐开启，可防止单个文件过大或录制中断导致文件损坏）
+    segment_time = 1800  # 分段时长(秒)，默认30分钟
     
-    # 文件名选项
-    parser.add_argument("--include-title", action="store_true", default=True, help="文件名包含标题")
-    parser.add_argument("--platform-folder", action="store_true", default=True, help="创建平台文件夹")
-    parser.add_argument("--author-folder", action="store_true", default=True, help="创建主播文件夹")
-    parser.add_argument("--time-folder", action="store_true", default=True, help="创建日期文件夹")
-    parser.add_argument("--title-folder", action="store_true", help="创建标题文件夹")
+    # 代理和网络设置
+    proxy = None  # 代理地址, 例如: "http://127.0.0.1:7890"
+    cookies_file = None  # Cookies文件路径(JSON格式)
+    force_https = False  # 强制使用HTTPS录制
     
-    # 后处理选项
-    parser.add_argument("--script", type=str, help="录制完成后运行的自定义脚本")
-    parser.add_argument("--convert-mp4", action="store_true", help="非MP4格式录制完成后转换为MP4")
+    # 文件夹和文件名设置
+    include_title = True  # 文件名是否包含直播标题
+    platform_folder = True  # 是否按平台创建文件夹
+    author_folder = True  # 是否按主播创建文件夹
+    time_folder = True  # 是否按日期创建文件夹
+    title_folder = False  # 是否按标题创建文件夹
     
-    # 解析命令行参数
-    args = parser.parse_args()
+    # 监控设置(仅当mode="monitor"时有效)
+    check_interval = 60  # 检查直播状态的间隔时间(秒)
+    
+    # 其他设置
+    custom_script = None  # 录制完成后运行的自定义脚本
+    convert_to_mp4 = True  # 非MP4格式录制完成后是否转换为MP4
+    # -------------配置结束-------------
+    
     
     # 加载cookies
     cookies = None
-    if args.cookies and os.path.exists(args.cookies):
+    if cookies_file and os.path.exists(cookies_file):
         try:
-            with open(args.cookies, 'r', encoding='utf-8') as f:
+            with open(cookies_file, 'r', encoding='utf-8') as f:
                 cookies = json.load(f)
-            print(f"已加载Cookies: {args.cookies}")
+            print(f"已加载Cookies: {cookies_file}")
         except Exception as e:
             print(f"加载Cookies失败: {str(e)}")
     
     # 创建API对象
     stream_cap = StreamCapAPI(
-        output_dir=args.output,
-        proxy=args.proxy,
+        output_dir=output_dir,
+        proxy=proxy,
         cookies=cookies,
-        record_quality=args.quality,
-        save_format=args.format,
-        segment_record=args.segment,
-        segment_time=args.segment_time,
-        filename_includes_title=args.include_title,
-        folder_name_platform=args.platform_folder,
-        folder_name_author=args.author_folder,
-        folder_name_time=args.time_folder,
-        folder_name_title=args.title_folder,
-        force_https_recording=args.force_https,
-        custom_script_command=args.script
+        record_quality=record_quality,
+        save_format=save_format,
+        segment_record=segment_record,
+        segment_time=segment_time,
+        filename_includes_title=include_title,
+        folder_name_platform=platform_folder,
+        folder_name_author=author_folder,
+        folder_name_time=time_folder,
+        folder_name_title=title_folder,
+        force_https_recording=force_https,
+        custom_script_command=custom_script
     )
     
-    # 开始录制
-    save_path = await stream_cap.start_recording(args.url)
+    # 创建一个变量来帮助处理优雅退出
+    recording_or_monitoring = False
     
-    # 如果需要转换为MP4且启用了参数
-    if save_path and args.convert_mp4 and args.format != "mp4":
-        if args.segment:
-            import glob
-            # 为分段文件构建模式
-            segment_pattern = save_path.replace("_%03d", "_*").rsplit(".", 1)[0] + f".{args.format}"
-            segment_files = glob.glob(segment_pattern)
-            print(f"找到 {len(segment_files)} 个分段文件进行MP4转换")
-            
-            for segment_file in segment_files:
-                await stream_cap.converts_mp4(segment_file)
-        else:
-            await stream_cap.converts_mp4(save_path)
-    
-    if save_path:
-        print(f"录制完成: {save_path}")
-    else:
-        print("录制失败")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    import argparse
     try:
-        asyncio.run(main())
+        if mode == "record":
+            print(f"开始录制直播: {live_url}")
+            recording_or_monitoring = True
+            asyncio.run(stream_cap.start_recording(live_url))
+        elif mode == "monitor":
+            print(f"开始监控直播: {live_url}，检查间隔: {check_interval}秒")
+            recording_or_monitoring = True
+            async def run_monitor():
+                success = await stream_cap.start_monitoring(live_url, check_interval)
+                if success:
+                    print(f"监控已启动，按Ctrl+C停止...")
+                    # 保持进程运行直到用户中断
+                    while True:
+                        await asyncio.sleep(1)
+                else:
+                    print("启动监控失败")
+            
+            asyncio.run(run_monitor())
+        else:
+            print(f"不支持的模式: {mode}，请使用 'record' 或 'monitor'")
     except KeyboardInterrupt:
         print("\n用户中断，程序退出")
-        sys.exit(0) 
+        
+        # 尝试优雅地停止录制或监控
+        if recording_or_monitoring:
+            try:
+                # 创建一个新的事件循环以执行清理操作
+                cleanup_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(cleanup_loop)
+                
+                async def cleanup():
+                    try:
+                        if stream_cap.is_recording:
+                            print("正在停止录制...")
+                            await stream_cap.stop_recording()
+                        
+                        if stream_cap.is_monitoring:
+                            print("正在停止监控...")
+                            await stream_cap.stop_monitoring()
+                    except Exception as e:
+                        print(f"清理资源时出错: {str(e)}")
+                
+                cleanup_loop.run_until_complete(cleanup())
+                cleanup_loop.close()
+                print("已完成资源清理")
+            except Exception as e:
+                print(f"程序退出时出错: {str(e)}")
+        
+        sys.exit(0)
+    except Exception as e:
+        print(f"程序执行出错: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1) 
