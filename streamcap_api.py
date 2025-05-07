@@ -14,6 +14,175 @@ class VideoQuality:
     SD = "标清"
     LD = "流畅"
 
+# FFmpeg命令构建器基类
+class FFmpegCommandBuilder:
+    DEFAULT_CONFIG = {
+        "rw_timeout": "15000000",
+        "analyzeduration": "20000000",
+        "probesize": "10000000",
+        "bufsize": "8000k",
+        "max_muxing_queue_size": "1024",
+    }
+
+    OVERSEAS_CONFIG = {
+        "rw_timeout": "50000000",
+        "analyzeduration": "40000000",
+        "probesize": "20000000",
+        "bufsize": "15000k",
+        "max_muxing_queue_size": "2048",
+    }
+
+    FFMPEG_USER_AGENT = (
+        "Mozilla/5.0 (Linux; Android 11; SAMSUNG SM-G973U) AppleWebKit/537.36 (KHTML, like Gecko) "
+        "SamsungBrowser/14.2 Chrome/87.0.4280.141 Mobile Safari/537.36"
+    )
+
+    def __init__(
+        self,
+        record_url: str,
+        is_overseas: bool = False,
+        segment_record: bool = False,
+        segment_time: str = None,
+        full_path: str = None,
+        headers: str = None,
+        proxy: str = None,
+    ):
+        self.record_url = record_url
+        self.is_overseas = is_overseas
+        self.segment_record = segment_record
+        self.segment_time = segment_time
+        self.full_path = full_path or ""
+        self.proxy = proxy or ""
+        self.headers = headers or ""
+
+    def _get_basic_ffmpeg_command(self) -> List[str]:
+        """
+        构建基本的FFmpeg命令。与原项目保持完全一致
+        """
+        config = self.OVERSEAS_CONFIG if self.is_overseas else self.DEFAULT_CONFIG
+        command = [
+            "ffmpeg",
+            "-y",
+            "-v", "verbose",
+            "-rw_timeout", config["rw_timeout"],
+            "-loglevel", "error",
+            "-hide_banner",
+            "-user_agent", self.FFMPEG_USER_AGENT,
+            "-protocol_whitelist", "rtmp,crypto,file,http,https,tcp,tls,udp,rtp,httpproxy",
+            "-thread_queue_size", "1024",
+            "-analyzeduration", config["analyzeduration"],
+            "-probesize", config["probesize"],
+            "-fflags", "+discardcorrupt",
+            "-re",
+            "-i", self.record_url,
+            "-bufsize", config["bufsize"],
+            "-sn",
+            "-dn",
+            "-reconnect_delay_max", "60",
+            "-reconnect_streamed",
+            "-reconnect_at_eof",
+            "-max_muxing_queue_size", config["max_muxing_queue_size"],
+            "-correct_ts_overflow", "1",
+            "-avoid_negative_ts", "1",
+        ]
+
+        if self.headers:
+            command.insert(11, "-headers")
+            command.insert(12, self.headers)
+
+        if self.proxy:
+            command.insert(1, "-http_proxy")
+            command.insert(2, self.proxy)
+
+        return command
+
+# MP4命令构建器
+class MP4CommandBuilder(FFmpegCommandBuilder):
+    def build_command(self) -> List[str]:
+        command = self._get_basic_ffmpeg_command()
+        if self.segment_record:
+            additional_commands = [
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-map", "0",
+                "-f", "segment",
+                "-segment_time", str(self.segment_time),
+                "-segment_format", "mp4",
+                "-reset_timestamps", "1",
+                "-movflags", "+frag_keyframe+empty_moov",
+                "-flags", "global_header",
+                self.full_path,
+            ]
+        else:
+            additional_commands = [
+                "-map", "0",
+                "-c:v", "copy",
+                "-c:a", "copy",
+                "-f", "mp4",
+                "-movflags", "+faststart",
+                self.full_path,
+            ]
+
+        command.extend(additional_commands)
+        return command
+
+# FLV命令构建器
+class FLVCommandBuilder(FFmpegCommandBuilder):
+    def build_command(self) -> List[str]:
+        command = self._get_basic_ffmpeg_command()
+        additional_commands = [
+            "-map", "0",
+            "-c:v", "copy",
+            "-c:a", "copy",
+            "-bsf:a", "aac_adtstoasc",
+            "-flvflags", "no_duration_filesize",
+            "-f", "flv",
+            self.full_path,
+        ]
+        command.extend(additional_commands)
+        return command
+
+# TS命令构建器
+class TSCommandBuilder(FFmpegCommandBuilder):
+    def build_command(self) -> List[str]:
+        command = self._get_basic_ffmpeg_command()
+        if self.segment_record:
+            additional_commands = [
+                "-c:v", "copy",
+                "-c:a", "copy",
+                "-map", "0",
+                "-f", "segment",
+                "-segment_time", str(self.segment_time),
+                "-segment_format", "mpegts",
+                "-mpegts_flags", "+resend_headers",
+                "-reset_timestamps", "1",
+                self.full_path,
+            ]
+        else:
+            additional_commands = [
+                "-map", "0",
+                "-c:v", "copy",
+                "-c:a", "copy",
+                "-f", "mpegts",
+                "-mpegts_flags", "+resend_headers",
+                self.full_path,
+            ]
+
+        command.extend(additional_commands)
+        return command
+
+# 创建命令构建器
+def create_builder(format_type: str, **kwargs) -> FFmpegCommandBuilder:
+    format_to_class = {
+        "mp4": MP4CommandBuilder,
+        "flv": FLVCommandBuilder,
+        "ts": TSCommandBuilder,
+    }
+    builder_class = format_to_class.get(format_type.lower())
+    if not builder_class:
+        raise ValueError(f"不支持的格式: {format_type}")
+    return builder_class(**kwargs)
+
 # 直播流录制类
 class StreamCapAPI:
     def __init__(
@@ -136,6 +305,15 @@ class StreamCapAPI:
             
         return url
     
+    def _get_headers_params(self, record_url: str) -> str:
+        """获取请求头参数"""
+        headers = ""
+        if "douyin.com" in record_url or "douyincdn.com" in record_url:
+            headers = "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36\r\nreferer: https://live.douyin.com/\r\n"
+        elif "tiktok.com" in record_url:
+            headers = "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36\r\nreferer: https://www.tiktok.com/\r\n"
+        return headers
+    
     async def fetch_stream(self, live_url: str):
         """获取直播流信息"""
         try:
@@ -192,52 +370,6 @@ class StreamCapAPI:
             traceback.print_exc()
             return None
     
-    def _build_ffmpeg_command(self, record_url: str, save_path: str) -> List[str]:
-        """构建FFmpeg命令"""
-        ffmpeg_command = ["ffmpeg", "-y"]
-        
-        # 添加用户代理
-        headers = {}
-        if "douyin.com" in record_url:
-            headers["user-agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
-            headers["referer"] = "https://live.douyin.com/"
-        elif "tiktok.com" in record_url:
-            headers["user-agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"
-            headers["referer"] = "https://www.tiktok.com/"
-        
-        if headers:
-            for key, value in headers.items():
-                ffmpeg_command.extend(["-headers", f"{key}: {value}"])
-        
-        # 添加代理
-        if self.proxy:
-            if self.proxy.startswith("http"):
-                ffmpeg_command.extend(["-http_proxy", self.proxy])
-            elif self.proxy.startswith("socks"):
-                ffmpeg_command.extend(["-socks", self.proxy])
-        
-        # 添加输入
-        ffmpeg_command.extend(["-i", record_url])
-        
-        # 添加分段参数
-        if self.segment_record and self.save_format != "flv":
-            ffmpeg_command.extend([
-                "-f", "segment",
-                "-segment_time", self.segment_time,
-                "-reset_timestamps", "1"
-            ])
-        
-        # 添加编码参数
-        ffmpeg_command.extend([
-            "-c", "copy",
-            "-bsf:a", "aac_adtstoasc"
-        ])
-        
-        # 添加输出路径
-        ffmpeg_command.append(save_path)
-        
-        return ffmpeg_command
-    
     async def start_recording(self, live_url: str) -> str:
         """开始录制直播"""
         try:
@@ -257,8 +389,21 @@ class StreamCapAPI:
             # 处理录制URL
             record_url = self._get_record_url(stream_info.record_url)
             
+            # 获取请求头
+            headers = self._get_headers_params(record_url)
+            
             # 构建ffmpeg命令
-            ffmpeg_command = self._build_ffmpeg_command(record_url, save_path)
+            ffmpeg_builder = create_builder(
+                self.save_format,
+                record_url=record_url,
+                proxy=self.proxy,
+                segment_record=self.segment_record,
+                segment_time=self.segment_time,
+                full_path=save_path,
+                headers=headers
+            )
+            
+            ffmpeg_command = ffmpeg_builder.build_command()
             
             print("开始录制直播...")
             print(f"录制URL: {record_url}")
@@ -277,10 +422,12 @@ class StreamCapAPI:
             # 等待进程完成
             print("录制进行中，按Ctrl+C停止...")
             try:
+                # 保持进程活动状态，用于手动中断
                 await self.ffmpeg_process.wait()
                 
                 # 检查返回码
-                if self.ffmpeg_process.returncode == 0:
+                safe_return_codes = [0, 255]  # 正常退出和中断的返回码
+                if self.ffmpeg_process.returncode in safe_return_codes:
                     print("录制已成功完成")
                 else:
                     print(f"录制异常结束，返回码: {self.ffmpeg_process.returncode}")
@@ -301,6 +448,20 @@ class StreamCapAPI:
             if self.custom_script_command:
                 await self.run_custom_script(self.custom_script_command, save_path)
             
+            # 如果需要转换为MP4且原格式不是MP4，则进行转换
+            if self.save_format != "mp4" and self.segment_record:
+                # 对于分段录制，处理所有分段文件
+                import glob
+                segment_pattern = save_path.replace("_%03d", "_*").rsplit(".", 1)[0] + f".{self.save_format}"
+                segment_files = glob.glob(segment_pattern)
+                print(f"找到 {len(segment_files)} 个分段文件需要转换")
+                
+                for segment_file in segment_files:
+                    await self.converts_mp4(segment_file, delete_original=True)
+            elif self.save_format != "mp4":
+                # 单个文件的转换
+                await self.converts_mp4(save_path, delete_original=True)
+            
             return save_path
             
         except Exception as e:
@@ -308,36 +469,72 @@ class StreamCapAPI:
             import traceback
             traceback.print_exc()
             self.is_recording = False
+            
+            # 尝试清理未完成的进程
+            if self.ffmpeg_process:
+                try:
+                    self.ffmpeg_process.terminate()
+                    await asyncio.wait_for(self.ffmpeg_process.wait(), timeout=5.0)
+                except (asyncio.TimeoutError, Exception) as term_err:
+                    print(f"终止FFmpeg进程时出错: {str(term_err)}")
+                    try:
+                        self.ffmpeg_process.kill()
+                    except Exception:
+                        pass
+            
             return None
     
     async def stop_recording(self):
         """停止录制"""
         if not self.is_recording or not self.ffmpeg_process:
-            return
+            return False
             
+        print("正在停止录制...")
         # 在Windows上用q来优雅地关闭ffmpeg
         if os.name == "nt" and self.ffmpeg_process.stdin:
             try:
                 self.ffmpeg_process.stdin.write(b"q")
                 await self.ffmpeg_process.stdin.drain()
+                print("已发送退出命令")
+                # 给一点时间让FFmpeg处理q命令
+                try:
+                    await asyncio.wait_for(self.ffmpeg_process.wait(), timeout=5.0)
+                    print("FFmpeg进程已正常退出")
+                    self.is_recording = False
+                    self.ffmpeg_process = None
+                    return True
+                except asyncio.TimeoutError:
+                    print("FFmpeg进程在接收到q命令后没有及时退出，将强制终止")
             except Exception as e:
                 print(f"发送退出命令时出错: {str(e)}")
         
         # 其他平台或当stdin失败时，尝试终止进程
         try:
+            print("正在终止FFmpeg进程...")
             self.ffmpeg_process.terminate()
             # 等待进程结束，超时后强制终止
             try:
                 await asyncio.wait_for(self.ffmpeg_process.wait(), timeout=5.0)
+                print("FFmpeg进程已成功终止")
             except asyncio.TimeoutError:
                 print("FFmpeg进程没有及时退出，强制终止")
                 self.ffmpeg_process.kill()
                 await self.ffmpeg_process.wait()
+                print("FFmpeg进程已被强制终止")
         except Exception as e:
             print(f"终止录制过程时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            try:
+                self.ffmpeg_process.kill()
+                await self.ffmpeg_process.wait()
+                print("FFmpeg进程已被强制终止")
+            except Exception:
+                pass
         
         self.is_recording = False
         self.ffmpeg_process = None
+        return True
     
     async def run_custom_script(self, script_command: str, save_path: str):
         """运行自定义脚本"""
@@ -375,7 +572,7 @@ class StreamCapAPI:
     
     async def converts_mp4(self, file_path: str, delete_original: bool = True) -> str:
         """将录制文件转换为MP4格式"""
-        if self.save_format == "mp4":
+        if self.save_format == "mp4" and not file_path.endswith(".ts"):
             print("文件已经是MP4格式，无需转换")
             return file_path
             
@@ -390,6 +587,7 @@ class StreamCapAPI:
                 "ffmpeg", "-y",
                 "-i", original_path,
                 "-c", "copy",
+                "-movflags", "+faststart",  # 添加此标志确保MP4文件可以流式播放
                 output_path
             ]
             
@@ -404,19 +602,25 @@ class StreamCapAPI:
             stdout, stderr = await process.communicate()
             
             if process.returncode == 0:
-                print("转换成功")
+                print(f"转换成功: {output_path}")
                 if delete_original and os.path.exists(output_path):
-                    os.remove(original_path)
-                    print(f"已删除原始文件: {original_path}")
+                    try:
+                        os.remove(original_path)
+                        print(f"已删除原始文件: {original_path}")
+                    except Exception as e:
+                        print(f"删除原始文件失败: {str(e)}")
                 return output_path
             else:
                 print(f"转换失败，返回码: {process.returncode}")
                 if stderr:
-                    print(f"FFmpeg错误: {stderr.decode('utf-8', errors='ignore')}")
+                    error_msg = stderr.decode('utf-8', errors='ignore')
+                    print(f"FFmpeg错误: {error_msg[:200]}..." if len(error_msg) > 200 else error_msg)
                 return original_path
                 
         except Exception as e:
             print(f"转换文件时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return file_path
 
 async def main():
@@ -485,12 +689,25 @@ async def main():
     # 开始录制
     save_path = await stream_cap.start_recording(args.url)
     
-    # 转换为MP4
+    # 如果需要转换为MP4且启用了参数
     if save_path and args.convert_mp4 and args.format != "mp4":
-        save_path = await stream_cap.converts_mp4(save_path)
-        
+        if args.segment:
+            import glob
+            # 为分段文件构建模式
+            segment_pattern = save_path.replace("_%03d", "_*").rsplit(".", 1)[0] + f".{args.format}"
+            segment_files = glob.glob(segment_pattern)
+            print(f"找到 {len(segment_files)} 个分段文件进行MP4转换")
+            
+            for segment_file in segment_files:
+                await stream_cap.converts_mp4(segment_file)
+        else:
+            await stream_cap.converts_mp4(save_path)
+    
     if save_path:
         print(f"录制完成: {save_path}")
+    else:
+        print("录制失败")
+        sys.exit(1)
 
 if __name__ == "__main__":
     import argparse
