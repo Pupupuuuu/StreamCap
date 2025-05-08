@@ -5,8 +5,7 @@
 ## 准备工作
 
 1. 确保 API 服务已经启动并在运行
-   - Windows: 执行 `start_server.bat`
-   - Linux/Mac: 执行 `./start_server.sh`
+   - 执行 `start_server.bat`
 
 2. 确保可以访问 API 服务
    - 打开浏览器访问 `http://localhost:8000/docs`
@@ -19,7 +18,7 @@
 - cURL: 命令行工具，适用于所有平台
 - Postman: GUI工具，提供更友好的界面
 - 浏览器中的 Swagger UI: 直接在 `/docs` 页面中测试
-- 提供的测试脚本: `test_api.bat` 或 `test_api.sh`
+- 提供的测试脚本: `test_api.bat`
 
 ## 测试案例
 
@@ -219,32 +218,29 @@ curl -X POST http://localhost:8000/stop \
 3. 停止所有任务
 
 **脚本示例**:
-```bash
-#!/bin/bash
+```powershell
 # 启动多个监控任务
-for i in {1..5}
-do
-    curl -s -X POST http://localhost:8000/record \
-      -H "Content-Type: application/json" \
-      -d '{
-        "url": "https://live.douyin.com/895511283289",
-        "mode": "monitor",
-        "output_dir": "recordings_'$i'",
-        "interval": 30
-      }'
-    echo "Started task $i"
-    sleep 1
-done
+for ($i=1; $i -le 5; $i++) {
+    $data = @{
+        url = "https://live.douyin.com/895511283289"
+        mode = "monitor"
+        output_dir = "recordings_$i"
+        interval = 30
+    } | ConvertTo-Json
+    
+    Invoke-RestMethod -Uri "http://localhost:8000/record" -Method Post -Body $data -ContentType "application/json"
+    Write-Host "Started task $i"
+    Start-Sleep -Seconds 1
+}
 
 # 查询所有任务
-curl -X GET http://localhost:8000/status
+Invoke-RestMethod -Uri "http://localhost:8000/status" -Method Get
 
 # 停止所有任务
-curl -X POST http://localhost:8000/stop \
-  -H "Content-Type: application/json" \
-  -d '{
-    "all": true
-  }'
+$stopData = @{
+    all = $true
+} | ConvertTo-Json
+Invoke-RestMethod -Uri "http://localhost:8000/stop" -Method Post -Body $stopData -ContentType "application/json"
 ```
 
 **预期结果**:
@@ -311,8 +307,7 @@ curl -X POST http://localhost:8000/stop \
 **目的**: 验证提供的测试脚本功能
 
 **步骤**:
-- Windows: 执行 `test_api.bat https://live.douyin.com/895511283289 monitor 60`
-- Linux/Mac: 执行 `./test_api.sh https://live.douyin.com/895511283289 monitor 60`
+- 执行 `test_api.bat https://live.douyin.com/895511283289 monitor 60`
 
 **预期结果**:
 - 脚本成功执行完整测试流程:
@@ -334,7 +329,7 @@ curl -X POST http://localhost:8000/stop \
 
 **目的**: 验证 API 处理并发请求的能力
 
-**工具**: Apache Bench 或 wrk
+**工具**: 可以使用 ApacheBench 或其他性能测试工具
 
 **步骤**:
 1. 使用并发测试工具发送多个并发请求
@@ -373,7 +368,7 @@ curl -X POST http://localhost:8000/record \
 
 ## 集成测试脚本
 
-创建一个集成测试脚本来自动执行所有测试案例：
+可以创建一个集成测试脚本来自动执行所有测试案例：
 
 ```python
 #!/usr/bin/env python3
@@ -571,4 +566,46 @@ if __name__ == "__main__":
 | 案例8: 启动大量录制任务 | □ 通过 □ 失败 | | |
 | 案例9: 错误情况测试 - 无效URL | □ 通过 □ 失败 | | |
 | 案例10: 错误情况测试 - 停止不存在的任务 | □ 通过 □ 失败 | | |
-| 案例11: 使用提供的测试脚本 | □ 通过 □ 失败 | | | 
+| 案例11: 使用提供的测试脚本 | □ 通过 □ 失败 | | |
+
+## 免责声明
+
+### 使用风险免责声明
+
+本测试文档及相关测试脚本（以下简称"测试材料"）仅作为StreamCap API服务的测试指南。使用本测试材料时，用户需了解并同意以下条款：
+
+1. **测试责任**：用户应在安全的测试环境中执行测试。开发者不对用户执行测试过程中可能导致的任何系统崩溃、数据丢失或其他损害承担责任。
+
+2. **测试结果**：测试结果可能因系统环境、网络条件和直播平台变更等因素而异。本测试材料不保证API在所有环境下都能达到相同的测试结果。
+
+3. **测试数据**：用户应对测试过程中生成的数据负责，包括但不限于录制的视频文件、日志文件等。
+
+### 技术限制
+
+1. **资源消耗**：某些测试案例（如案例8：启动大量录制任务）可能消耗大量系统资源。用户应确保系统有足够的资源进行测试，并在必要时调整测试参数。
+
+2. **服务依赖**：测试依赖于外部直播平台提供的内容。如果直播平台服务不可用或内容不可访问，测试可能失败。
+
+3. **网络要求**：测试需要稳定的网络连接。网络问题可能导致测试失败或结果不准确。
+
+### 代码使用限制
+
+1. **测试目的**：本文档中提供的代码示例和测试脚本仅用于测试目的。用户不得将其用于任何非法活动或违反第三方服务条款的活动。
+
+2. **代码修改**：用户可以根据需要修改测试代码，但应自行负责因修改导致的任何问题。
+
+3. **第三方工具**：文档中提到的第三方工具（如cURL、Postman等）的使用应遵循各自的使用条款和许可协议。
+
+### 合规提醒
+
+1. **直播平台规定**：在测试过程中录制直播内容应遵守相关直播平台的服务条款。使用本测试材料进行测试不应违反这些条款。
+
+2. **内容责任**：用户对测试过程中录制的内容负有完全责任，并应确保其合法使用和存储。
+
+### 责任限制
+
+在法律允许的最大范围内，无论是基于合同、侵权行为还是其他法律理论，本测试材料的开发者对因使用本测试材料导致的任何直接、间接、附带、特殊、惩罚性或后果性损害不承担责任。
+
+### 最终解释权
+
+开发者保留对本免责声明的最终解释权。用户使用本测试材料即表示接受本免责声明的所有条款。 
