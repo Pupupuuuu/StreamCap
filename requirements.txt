@@ -5,3 +5,9 @@ screeninfo>=0.8.1
 aiofiles>=24.1.0
 streamget>=4.0.3
 python-dotenv>=1.0.1
+fastapi==0.103.1
+uvicorn==0.23.2
+pydantic>=2.3.0
+requests>=2.31.0
+python-multipart>=0.0.6
+aiofiles>=23.1.0
