@@ -868,7 +868,7 @@ if __name__ == "__main__":
     # 直接在这里设置参数而不是通过命令行
     # -------------用户配置区域-------------
     # 必填参数
-    live_url = "https://live.douyin.com/390687614124"  # 您的直播URL
+    live_url = "https://live.douyin.com/103059496864"  # 您的直播URL
     
     # 基本设置
     mode = "monitor"  # 运行模式: "monitor"(监控直播并自动录制) 或 "record"(直接录制)
