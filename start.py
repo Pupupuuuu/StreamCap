@@ -7,6 +7,9 @@ import sys
 import streamget
 from typing import Optional, Dict, Any, List, Union
 
+# 全局变量，用于控制程序退出
+exit_requested = False
+
 # 视频质量枚举
 class VideoQuality:
     OD = "原画"
@@ -309,10 +312,23 @@ class StreamCapAPI:
                     if self.is_monitoring:
                         await self.stop_monitoring()
                     
-                    # 清除停止请求标志
-                    status_data['stop_requested'] = False
-                    with open(self.status_file_path, 'w') as f:
-                        json.dump(status_data, f)
+                    # 清除状态文件
+                    try:
+                        if os.path.exists(self.status_file_path):
+                            os.remove(self.status_file_path)
+                            print("已删除状态文件")
+                    except Exception as e:
+                        print(f"删除状态文件时出错: {str(e)}")
+                    
+                    # 退出程序
+                    print("准备退出程序...")
+                    # 使用非零退出码以便可以区分正常退出和被外部请求终止
+                    # 我们不能在这里直接调用sys.exit()，因为这是在异步上下文中
+                    # 而是设置一个标志，让主循环检测到后退出
+                    global exit_requested
+                    exit_requested = True
+                    return  # 终止状态检查循环
+                    
             except Exception as e:
                 # 忽略错误，确保循环不会中断
                 pass
@@ -865,43 +881,89 @@ class StreamCapAPI:
 if __name__ == "__main__":
     import argparse
     
-    # 直接在这里设置参数而不是通过命令行
-    # -------------用户配置区域-------------
-    # 必填参数
-    live_url = "https://live.douyin.com/103059496864"  # 您的直播URL
+    # 创建命令行参数解析器
+    parser = argparse.ArgumentParser(description="StreamCap - 直播流录制工具")
     
-    # 基本设置
-    mode = "monitor"  # 运行模式: "monitor"(监控直播并自动录制) 或 "record"(直接录制)
+    # 添加参数
+    # 必选参数
+    parser.add_argument('url', type=str, help='直播URL')
+    
+    # 运行模式
+    parser.add_argument('-m', '--mode', choices=['record', 'monitor'], default='monitor',
+                        help='运行模式: record(直接录制) 或 monitor(监控直播并自动录制)')
     
     # 输出设置
-    output_dir = "downloads"  # 输出目录
-    save_format = "mp4"  # 录制格式: mp4, flv, ts
-    record_quality = "原画"  # 录制画质: "原画", "高清", "标清", "流畅"
+    parser.add_argument('-o', '--output-dir', type=str, default='downloads',
+                        help='输出目录路径')
+    parser.add_argument('-f', '--format', type=str, choices=['mp4', 'flv', 'ts'], default='mp4',
+                        help='录制格式')
+    parser.add_argument('-q', '--quality', type=str, choices=['原画', '高清', '标清', '流畅'], default='原画',
+                        help='录制画质')
     
     # 分段录制设置
-    segment_record = True  # 是否启用分段录制（推荐开启，可防止单个文件过大或录制中断导致文件损坏）
-    segment_time = 1800  # 分段时长(秒)，默认30分钟
+    parser.add_argument('--segment', action='store_true', default=True,
+                        help='启用分段录制（推荐开启，防止单个文件过大或录制中断导致文件损坏）')
+    parser.add_argument('--no-segment', action='store_false', dest='segment',
+                        help='禁用分段录制')
+    parser.add_argument('--segment-time', type=int, default=1800,
+                        help='分段时长(秒), 默认30分钟')
     
     # 代理和网络设置
-    proxy = None  # 代理地址, 例如: "http://127.0.0.1:7890"
-    cookies_file = None  # Cookies文件路径(JSON格式)
-    force_https = False  # 强制使用HTTPS录制
+    parser.add_argument('-p', '--proxy', type=str, help='代理地址, 例如: http://127.0.0.1:7890')
+    parser.add_argument('-c', '--cookies', type=str, help='Cookies文件路径(JSON格式)')
+    parser.add_argument('--force-https', action='store_true',
+                        help='强制使用HTTPS录制')
     
     # 文件夹和文件名设置
-    include_title = True  # 文件名是否包含直播标题
-    platform_folder = True  # 是否按平台创建文件夹
-    author_folder = True  # 是否按主播创建文件夹
-    time_folder = True  # 是否按日期创建文件夹
-    title_folder = False  # 是否按标题创建文件夹
+    parser.add_argument('--include-title', action='store_true', default=True,
+                        help='文件名包含直播标题')
+    parser.add_argument('--no-include-title', action='store_false', dest='include_title',
+                        help='文件名不包含直播标题')
+    parser.add_argument('--platform-folder', action='store_true', default=True,
+                        help='按平台创建文件夹')
+    parser.add_argument('--no-platform-folder', action='store_false', dest='platform_folder',
+                        help='不按平台创建文件夹')
+    parser.add_argument('--author-folder', action='store_true', default=True,
+                        help='按主播创建文件夹')
+    parser.add_argument('--no-author-folder', action='store_false', dest='author_folder',
+                        help='不按主播创建文件夹')
+    parser.add_argument('--time-folder', action='store_true', default=True,
+                        help='按日期创建文件夹')
+    parser.add_argument('--no-time-folder', action='store_false', dest='time_folder',
+                        help='不按日期创建文件夹')
+    parser.add_argument('--title-folder', action='store_true', default=False,
+                        help='按标题创建文件夹')
+    parser.add_argument('--no-title-folder', action='store_false', dest='title_folder',
+                        help='不按标题创建文件夹')
     
-    # 监控设置(仅当mode="monitor"时有效)
-    check_interval = 60  # 检查直播状态的间隔时间(秒)
+    # 监控设置
+    parser.add_argument('-i', '--interval', type=int, default=60,
+                        help='检查直播状态的间隔时间(秒), 仅当模式为monitor时有效')
     
     # 其他设置
-    custom_script = None  # 录制完成后运行的自定义脚本
-    convert_to_mp4 = True  # 非MP4格式录制完成后是否转换为MP4
-    # -------------配置结束-------------
+    parser.add_argument('--script', type=str, help='录制完成后运行的自定义脚本')
     
+    # 解析命令行参数
+    args = parser.parse_args()
+    
+    # 提取参数值
+    live_url = args.url
+    mode = args.mode
+    output_dir = args.output_dir
+    save_format = args.format
+    record_quality = args.quality
+    segment_record = args.segment
+    segment_time = args.segment_time
+    proxy = args.proxy
+    cookies_file = args.cookies
+    force_https = args.force_https
+    include_title = args.include_title
+    platform_folder = args.platform_folder
+    author_folder = args.author_folder
+    time_folder = args.time_folder
+    title_folder = args.title_folder
+    check_interval = args.interval
+    custom_script = args.script
     
     # 加载cookies
     cookies = None
@@ -938,17 +1000,47 @@ if __name__ == "__main__":
         if mode == "record":
             print(f"开始录制直播: {live_url}")
             recording_or_monitoring = True
-            asyncio.run(stream_cap.start_recording(live_url))
+            
+            async def run_record():
+                global exit_requested
+                await stream_cap.start_recording(live_url)
+                
+                # 如果是收到外部停止请求而不是正常完成，则需要显式退出
+                if exit_requested:
+                    print("收到退出请求，程序即将退出...")
+                    # 确保清理所有资源
+                    if stream_cap.status_file_path and os.path.exists(stream_cap.status_file_path):
+                        try:
+                            os.remove(stream_cap.status_file_path)
+                            print("已清理状态文件")
+                        except Exception as e:
+                            print(f"清理状态文件失败: {str(e)}")
+                    sys.exit(0)
+                    
+            asyncio.run(run_record())
         elif mode == "monitor":
             print(f"开始监控直播: {live_url}，检查间隔: {check_interval}秒")
             recording_or_monitoring = True
             async def run_monitor():
+                global exit_requested
                 success = await stream_cap.start_monitoring(live_url, check_interval)
                 if success:
                     print(f"监控已启动，按Ctrl+C停止...")
-                    # 保持进程运行直到用户中断
-                    while True:
+                    # 保持进程运行直到用户中断或收到退出请求
+                    while not exit_requested:
                         await asyncio.sleep(1)
+                    
+                    # 如果是收到退出请求，则正常退出程序
+                    if exit_requested:
+                        print("收到退出请求，程序即将退出...")
+                        # 确保清理所有资源
+                        if stream_cap.status_file_path and os.path.exists(stream_cap.status_file_path):
+                            try:
+                                os.remove(stream_cap.status_file_path)
+                                print("已清理状态文件")
+                            except Exception as e:
+                                print(f"清理状态文件失败: {str(e)}")
+                        sys.exit(0)
                 else:
                     print("启动监控失败")
             
