@@ -6,6 +6,7 @@ from datetime import datetime
 import sys
 import streamget
 from typing import Optional, Dict, Any, List, Union
+import re
 
 # 全局变量，用于控制程序退出
 exit_requested = False
@@ -122,7 +123,6 @@ class MP4CommandBuilder(FFmpegCommandBuilder):
                 "-c:v", "copy",
                 "-c:a", "copy",
                 "-f", "mp4",
-                "-movflags", "+faststart",
                 self.full_path,
             ]
 
@@ -341,17 +341,14 @@ class StreamCapAPI:
     
     def clean_name(self, name: str, default: str = None) -> str:
         """清理名称，移除不允许的字符"""
-        if not name:
-            return default or ""
-            
-        # 移除特殊字符
-        for char in ['\\', '/', ':', '*', '?', '"', '<', '>', '|']:
-            name = name.replace(char, '')
-        
-        # 移除前后空格
-        name = name.strip()
-        
-        return name or default or ""
+        if name and name.strip():
+            rstr = r"[\/\\\:\*\？?\"\<\>\|&#.。,， ~！· ]"
+            cleaned_name = name.strip().replace("（", "(").replace("）", ")")
+            cleaned_name = re.sub(rstr, "_", cleaned_name)
+            # 如果需要，去除emoji
+            cleaned_name = cleaned_name.replace("__", "_").strip("_")
+            return cleaned_name or default
+        return default or ""
     
     def _clean_and_truncate_title(self, title: str) -> str:
         """清理并截断标题"""
@@ -380,26 +377,50 @@ class StreamCapAPI:
         if self.recording_dir:
             return self.recording_dir
         
-        now = datetime.today().strftime("%Y-%m-%d_%H-%M-%S")
+        now = datetime.today().strftime("%Y%m%d")
+        # 确保使用绝对路径
+        if not os.path.isabs(self.output_dir):
+            self.output_dir = os.path.abspath(self.output_dir)
+            
         output_dir = self.output_dir.rstrip("/").rstrip("\\")
         
+        # 清理平台名称
+        platform_name = self.clean_name(stream_info.platform, "other")
+        
         if self.folder_name_platform:
-            output_dir = os.path.join(output_dir, stream_info.platform)
+            output_dir = os.path.join(output_dir, platform_name)
             
         if self.folder_name_author:
-            output_dir = os.path.join(output_dir, stream_info.anchor_name)
+            # 使用清理过的主播名称
+            anchor_name = self._clean_and_truncate_title(stream_info.anchor_name) or "broadcaster"
+            output_dir = os.path.join(output_dir, anchor_name)
             
         if self.folder_name_time:
-            output_dir = os.path.join(output_dir, now[:10])
+            output_dir = os.path.join(output_dir, now)
             
         if self.folder_name_title and stream_info.title:
             live_title = self._clean_and_truncate_title(stream_info.title)
-            if self.folder_name_time:
-                output_dir = os.path.join(output_dir, f"{live_title}_{stream_info.anchor_name}")
-            else:
-                output_dir = os.path.join(output_dir, f"{now[:10]}_{live_title}")
+            if live_title:
+                if self.folder_name_time:
+                    output_dir = os.path.join(output_dir, live_title)
+                else:
+                    output_dir = os.path.join(output_dir, f"{now}_{live_title}")
+        
+        try:
+            # 确保创建目录
+            os.makedirs(output_dir, exist_ok=True)
+            # 测试写入权限
+            test_file = os.path.join(output_dir, "test_write.tmp")
+            with open(test_file, "w") as f:
+                f.write("test")
+            os.remove(test_file)
+        except Exception as e:
+            print(f"创建或写入目录出错: {str(e)}，将使用默认下载目录")
+            # 如果目录不可写，使用系统临时目录
+            import tempfile
+            output_dir = os.path.join(tempfile.gettempdir(), "streamcap_downloads")
+            os.makedirs(output_dir, exist_ok=True)
                 
-        os.makedirs(output_dir, exist_ok=True)
         self.recording_dir = output_dir
         return output_dir
     
