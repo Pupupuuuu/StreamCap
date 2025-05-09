@@ -441,6 +441,9 @@ class StreamCapAPI:
             elif "bilibili.com" in live_url:
                 platform = "bilibili"
                 live_stream = streamget.BilibiliLiveStream(proxy_addr=self.proxy, cookies=self.cookies)
+            elif "kuaishou.com" in live_url:
+                platform = "kuaishou"
+                live_stream = streamget.KwaiLiveStream(proxy_addr=self.proxy, cookies=self.cookies)
             else:
                 platform = "douyin"  # 默认使用抖音
                 live_stream = streamget.DouyinLiveStream(proxy_addr=self.proxy, cookies=self.cookies)
@@ -454,6 +457,8 @@ class StreamCapAPI:
             elif platform == "tiktok":
                 json_data = await live_stream.fetch_web_stream_data(url=live_url)
             elif platform == "bilibili":
+                json_data = await live_stream.fetch_web_stream_data(url=live_url)
+            elif platform == "kuaishou":
                 json_data = await live_stream.fetch_web_stream_data(url=live_url)
             else:
                 # 默认使用抖音的方法
