@@ -419,11 +419,26 @@ class StreamCapAPI:
     def _get_headers_params(self, record_url: str) -> str:
         """获取请求头参数"""
         headers = ""
-        if "douyin.com" in record_url or "douyincdn.com" in record_url:
-            headers = "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36\r\nreferer: https://live.douyin.com/\r\n"
-        elif "tiktok.com" in record_url:
-            headers = "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36\r\nreferer: https://www.tiktok.com/\r\n"
-        return headers
+        
+        # 确定平台
+        platform_name, platform_key = get_platform_info(record_url)
+        
+        # 平台特定的请求头设置
+        live_domain = "/".join(record_url.split("/")[0:3])
+        record_headers = {
+            "douyin": "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36\r\nreferer: https://live.douyin.com/\r\n",
+            "tiktok": "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36\r\nreferer: https://www.tiktok.com/\r\n",
+            "pandalive": "origin:https://www.pandalive.co.kr",
+            "winktv": "origin:https://www.winktv.co.kr",
+            "popkontv": "origin:https://www.popkontv.com",
+            "flextv": "origin:https://www.flextv.co.kr",
+            "qiandurebo": "referer:https://qiandurebo.com",
+            "17live": "referer:https://17.live/en/live/6302408",
+            "lang": "referer:https://www.lang.live",
+            "shopee": "origin:" + live_domain
+        }
+        
+        return record_headers.get(platform_key, "")
     
     async def fetch_stream(self, live_url: str):
         """获取直播流信息"""
@@ -492,6 +507,9 @@ class StreamCapAPI:
             self.output_dir = self._get_output_dir(stream_info)
             save_path = self._get_save_path(filename)
             print(f"录制文件将保存至: {save_path}")
+            
+            # 确保目录存在
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
             
             # 处理录制URL
             record_url = self._get_record_url(stream_info.record_url)
@@ -808,56 +826,63 @@ class StreamCapAPI:
     
     async def converts_mp4(self, file_path: str, delete_original: bool = True) -> str:
         """将录制文件转换为MP4格式"""
-        if self.save_format == "mp4" and not file_path.endswith(".ts"):
-            print("文件已经是MP4格式，无需转换")
-            return file_path
+        converts_success = False
+        save_path = None
+        
+        try:
+            file_path = file_path.replace("\\", "/")
+            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                save_path = file_path.rsplit(".", maxsplit=1)[0] + ".mp4"
+                
+                # 使用subprocess而不是asyncio，更稳定
+                import subprocess
+                
+                # 获取适合当前操作系统的startupinfo设置
+                startupinfo = None
+                if os.name == "nt":
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                
+                _output = subprocess.check_output(
+                    [
+                        "ffmpeg",
+                        "-i", file_path,
+                        "-c:v", "copy",
+                        "-c:a", "copy",
+                        "-f", "mp4",
+                        save_path
+                    ],
+                    stderr=subprocess.STDOUT,
+                    startupinfo=startupinfo,
+                )
+                
+                converts_success = True
+                print(f"视频转码完成: {save_path}")
+                
+        except subprocess.CalledProcessError as e:
+            print(f"视频转码失败! 错误信息: {e.output.decode() if hasattr(e, 'output') else str(e)}")
             
         try:
-            original_path = file_path
-            output_path = os.path.splitext(original_path)[0] + ".mp4"
-            
-            print(f"正在将 {original_path} 转换为 {output_path}")
-            
-            # 构建ffmpeg命令
-            ffmpeg_command = [
-                "ffmpeg", "-y",
-                "-i", original_path,
-                "-c", "copy",
-                "-movflags", "+faststart",  # 添加此标志确保MP4文件可以流式播放
-                output_path
-            ]
-            
-            # 创建进程
-            process = await asyncio.create_subprocess_exec(
-                *ffmpeg_command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            # 等待进程完成
-            stdout, stderr = await process.communicate()
-            
-            if process.returncode == 0:
-                print(f"转换成功: {output_path}")
-                if delete_original and os.path.exists(output_path):
-                    try:
-                        os.remove(original_path)
-                        print(f"已删除原始文件: {original_path}")
-                    except Exception as e:
-                        print(f"删除原始文件失败: {str(e)}")
-                return output_path
-            else:
-                print(f"转换失败，返回码: {process.returncode}")
-                if stderr:
-                    error_msg = stderr.decode('utf-8', errors='ignore')
-                    print(f"FFmpeg错误: {error_msg[:200]}..." if len(error_msg) > 200 else error_msg)
-                return original_path
-                
+            if converts_success:
+                if delete_original:
+                    time.sleep(1)  # 给文件系统一点时间完成操作
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                    print(f"已删除原始文件: {file_path}")
+                else:
+                    # 如果不删除，则移动到original目录
+                    converts_dir = f"{os.path.dirname(save_path)}/original"
+                    os.makedirs(converts_dir, exist_ok=True)
+                    import shutil
+                    shutil.move(file_path, converts_dir)
+                    print(f"已移动转码文件: {file_path}")
+                    
+        except subprocess.CalledProcessError as e:
+            print(f"转换过程中发生错误: {str(e)}")
         except Exception as e:
-            print(f"转换文件时出错: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return file_path
+            print(f"发生未知错误: {str(e)}")
+            
+        return save_path if converts_success else file_path
 
     def __del__(self):
         """析构函数，用于清理资源"""
