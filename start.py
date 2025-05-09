@@ -8,6 +8,9 @@ import streamget
 from typing import Optional, Dict, Any, List, Union
 import re
 
+# 导入源码中的平台处理函数
+from app.core.platform_handlers import get_platform_info, get_platform_handler
+
 # 全局变量，用于控制程序退出
 exit_requested = False
 
@@ -428,40 +431,36 @@ class StreamCapAPI:
             print(f"正在获取直播流信息: {live_url}")
             print(f"使用代理: {self.proxy or '无'}")
             
-            # 识别平台
-            platform_name, platform_key = self._get_platform_info(live_url)
+            # 获取平台信息
+            platform_name, platform_key = get_platform_info(live_url)
             if not platform_key:
-                platform_key = "douyin"  # 默认使用抖音
+                print("无法识别直播平台，默认使用抖音")
+                platform_key = "douyin"
                 platform_name = "抖音直播"
-                
+            
             print(f"识别平台: {platform_name} ({platform_key})")
             
-            # 初始化相应的平台处理器
-            live_stream = self._get_platform_handler(live_url, platform_key)
-            if not live_stream:
+            # 获取平台处理器
+            handler = get_platform_handler(
+                live_url=live_url,
+                proxy=self.proxy,
+                cookies=self.cookies,
+                record_quality=self.record_quality,
+                platform=platform_key
+            )
+            
+            if not handler:
                 print(f"不支持的平台: {platform_key}")
                 return None
-                
+            
             # 获取流信息
-            try:
-                json_data = await live_stream.fetch_web_stream_data(url=live_url)
-                
-                # 针对抖音短链接特殊处理
-                if platform_key == "douyin" and "v.douyin.com" in live_url:
-                    json_data = await live_stream.fetch_app_stream_data(url=live_url)
-            except Exception as e:
-                print(f"获取直播流JSON数据失败: {str(e)}")
-                return None
-                
-            # 获取直播流URL
-            stream_info = await live_stream.fetch_stream_url(json_data, self.record_quality)
+            stream_info = await handler.get_stream_info(live_url)
             
             if stream_info and stream_info.is_live:
                 print(f"主播: {stream_info.anchor_name}, 标题: {stream_info.title}")
                 print(f"直播状态: {'在线' if stream_info.is_live else '离线'}")
-                # 设置平台信息
+                # 补充平台信息，以便后续处理
                 stream_info.platform = platform_name
-                stream_info.platform_key = platform_key
                 return stream_info
             else:
                 print("直播未开始或获取流信息失败")
@@ -473,128 +472,6 @@ class StreamCapAPI:
             traceback.print_exc()
             return None
             
-    def _get_platform_info(self, record_url: str) -> tuple:
-        """识别直播平台信息"""
-        # 平台映射表，与源码保持一致
-        platform_map = {
-            "douyin.com/": ("抖音直播", "douyin"),
-            "https://www.tiktok.com/": ("TikTok直播", "tiktok"),
-            "https://live.kuaishou.com/": ("快手直播", "kuaishou"),
-            "https://www.huya.com/": ("虎牙直播", "huya"),
-            "https://www.douyu.com/": ("斗鱼直播", "douyu"),
-            "https://www.yy.com/": ("YY直播", "yy"),
-            "https://live.bilibili.com/": ("B站直播", "bilibili"),
-            "https://www.xiaohongshu.com/": ("小红书直播", "xiaohongshu"),
-            "xhslink.com/": ("小红书直播", "xhs"),
-            "https://www.bigo.tv/": ("Bigo直播", "bigo"),
-            "https://app.blued.cn/": ("Blued直播", "blued"),
-            "sooplive.co.kr/": ("SOOP", "soop"),
-            "cc.163.com/": ("网易CC直播", "netease"),
-            "qiandurebo.com/": ("千度热播", "qiandurebo"),
-            "pandalive.co.kr/": ("PandaTV", "pandalive"),
-            "fm.missevan.com/": ("猫耳FM直播", "maoerfm"),
-            "winktv.co.kr/": ("WinkTV", "winktv"),
-            "flextv.co.kr/": ("FlexTV", "flextv"),
-            "look.163.com/": ("Look直播", "look"),
-            "popkontv.com/": ("PopkonTV", "popkontv"),
-            "twitcasting.tv/": ("TwitCasting", "twitcasting"),
-            "live.baidu.com/": ("百度直播", "baidu"),
-            "weibo.com/": ("微博直播", "weibo"),
-            "kugou.com/": ("酷狗直播", "kugou"),
-            "twitch.tv/": ("TwitchTV", "twitch"),
-            "liveme.com/": ("LiveMe", "liveme"),
-            "huajiao.com/": ("花椒直播", "huajiao"),
-            "7u66.com/": ("流星直播", "liuxing"),
-            "showroom-live.com/": ("ShowRoom", "showroom"),
-            "live.acfun.cn/": ("Acfun", "acfun"),
-            "tlclw.com/": ("畅聊直播", "changliao"),
-            "ybw1666.com/": ("音播直播", "yingbo"),
-            "inke.cn/": ("映客直播", "inke"),
-            "zhihu.com/": ("知乎直播", "zhihu"),
-            "chzzk.naver.com/": ("CHZZK", "chzzk"),
-            "haixiutv.com/": ("嗨秀直播", "haixiu"),
-            "vvxqiu.com/": ("VV星球", "vvxq"),
-            "17.live/": ("17Live", "17live"),
-            "lang.live/": ("浪Live", "lang"),
-            "m.pp.weimipopo.com/": ("漂漂直播", "piaopiao"),
-            ".6.cn/": ("六间房直播", "6room"),
-            "lehaitv.com/": ("乐嗨直播", "lehai"),
-            "h.catshow168.com/": ("花猫直播", "catshow"),
-            "live.shopee": ("shopee", "shopee"),
-            ".shp.": ("shopee", "shopee"),
-            "youtube.com/": ("Youtube", "youtube"),
-            "tb.cn": ("淘宝直播", "taobao"),
-            "3.cn": ("京东直播", "jd"),
-            "faceit.com": ("faceit", "faceit"),
-            ".m3u8": ("自定义录制直播", "custom"),
-            ".flv": ("自定义录制直播", "custom"),
-        }
-
-        for key, value in platform_map.items():
-            if key in record_url:
-                return value
-        
-        return None, None
-        
-    def _get_platform_handler(self, live_url: str, platform_key: str):
-        """获取平台处理器"""
-        # 平台与streamget类的映射
-        handler_map = {
-            "acfun": streamget.AcfunLiveStream,
-            "baidu": streamget.BaiduLiveStream,
-            "bigo": streamget.BigoLiveStream,
-            "bilibili": streamget.BilibiliLiveStream,
-            "blued": streamget.BluedLiveStream,
-            "chzzk": streamget.ChzzkLiveStream,
-            "douyin": streamget.DouyinLiveStream,
-            "douyu": streamget.DouyuLiveStream,
-            "faceit": streamget.FaceitLiveStream,
-            "flextv": streamget.FlexTVLiveStream,
-            "haixiu": streamget.HaixiuLiveStream,
-            "huajiao": streamget.HuajiaoLiveStream,
-            "huamao": streamget.HuamaoLiveStream,
-            "huya": streamget.HuyaLiveStream,
-            "inke": streamget.InkeLiveStream,
-            "jd": streamget.JDLiveStream,
-            "kuaishou": streamget.KwaiLiveStream,
-            "kugou": streamget.KugouLiveStream,
-            "lang": streamget.LangLiveStream,
-            "lehai": streamget.LehaiLiveStream,
-            "liveme": streamget.LiveMeLiveStream,
-            "look": streamget.LookLiveStream,
-            "maoerfm": streamget.MaoerLiveStream,
-            "netease": streamget.NeteaseLiveStream,
-            "pandalive": streamget.PandaLiveStream,
-            "piaopiao": streamget.PiaopaioLiveStream,
-            "popkontv": streamget.PopkonTVLiveStream,
-            "qiandurebo": streamget.QiandureboLiveStream,
-            "rednote": streamget.RedNoteLiveStream,
-            "shopee": streamget.ShopeeLiveStream,
-            "showroom": streamget.ShowRoomLiveStream,
-            "6room": streamget.SixRoomLiveStream,
-            "soop": streamget.SoopLiveStream,
-            "taobao": streamget.TaobaoLiveStream,
-            "tiktok": streamget.TikTokLiveStream,
-            "twitcasting": streamget.TwitCastingLiveStream,
-            "twitch": streamget.TwitchLiveStream,
-            "vvxq": streamget.VVXQLiveStream,
-            "weibo": streamget.WeiboLiveStream,
-            "winktv": streamget.WinkTVLiveStream,
-            "yinbo": streamget.YinboLiveStream,
-            "yiqilive": streamget.YiqiLiveStream,
-            "youtube": streamget.YoutubeLiveStream,
-            "yy": streamget.YYLiveStream,
-            "zhihu": streamget.ZhihuLiveStream,
-        }
-        
-        # 获取对应的处理器类
-        handler_class = handler_map.get(platform_key)
-        if not handler_class:
-            return None
-            
-        # 实例化处理器
-        return handler_class(proxy_addr=self.proxy, cookies=self.cookies)
-    
     async def start_recording(self, live_url: str) -> str:
         """开始录制直播"""
         save_path = None
